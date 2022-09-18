@@ -25,11 +25,35 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mount.h>
+#include <X11/Xlib.h>
+#include <X11/extensions/XInput.h>
 
 /// The name to look for in order to identify the touchscreen
-#define CHUMBY_TOUCHSCREEN_NAME     "Chumby 8 touchscreen"
+#define CHUMBY_TOUCHSCREEN_NAME         "Chumby 8 touchscreen"
 /// File used for storing touchscreen calibration
-#define CALIBRATION_FILE            "/etc/touchscreencal"
+#define CALIBRATION_FILE                "/etc/X11/xorg.conf.d/touchscreen.conf"
+/// Name of the X11 input device property containing the calibration matrix
+#define LIBINPUT_CALIBRATION_PROPERTY   "libinput Calibration Matrix"
+
+/// Keeps track of whether we received an error from X11
+static volatile int xErrorOccurred = false;
+
+/**
+ * @brief Custom error handler for Xlib during touchscreen calibration
+ * @param display The display the error occurred on
+ * @param err Info about the error
+ * @return Anything; ignored by Xlib
+ */
+static int touchScreenCalibrationErrorHandler(Display *display, XErrorEvent *err)
+{
+    Q_UNUSED(display);
+    Q_UNUSED(err);
+
+    // Mark that an error did indeed occur; applyCalibration will detect if this handler has run
+    xErrorOccurred = true;
+
+    return 0;
+}
 
 /**
  * @brief Finds the touchscreen, and returns an opened file descriptor to it if found
@@ -70,114 +94,123 @@ int CalibrationUtils::findTouchScreen()
 
 /**
  * @brief Applies the supplied calibration system-wide
- * @param xmin Minimum valid raw X reading
- * @param xmax Maximum valid raw X reading
- * @param ymin Minimum valid raw Y reading
- * @param ymax Maximum valid raw Y reading
+ * @param matrix The new 3x3 calibration matrix for libinput (top row, middle row, bottom row sequentially)
  * @return True on success, false on failure
- *
- * Note: This is a very simplistic calibration. It doesn't support any kind of rotation
- * or skewing. So it assumes that all we have to do is modify the X and Y min/max in order
- * to calibrate. This seems to work decently enough for the Chumby 8's touchscreen. For
- * anything more complicated, it would probably make more sense to use tslib instead.
- * This is the bare minimum required for Qt's evdevtouch plugin to work properly.
  */
-bool CalibrationUtils::applyCalibration(int xmin, int xmax, int ymin, int ymax)
+bool CalibrationUtils::applyCalibration(QVector<float> const &matrix)
 {
-    // Find the touchscreen
-    int tsfd = findTouchScreen();
-    if (tsfd < 0) {
+    bool retval = false;
+    bool found = false;
+    XID deviceID;
+    XDevice *device;
+    Atom matrixAtom;
+    Atom floatAtom;
+    XErrorHandler prevErrorHandler;
+
+    // Ensure there are exactly 9 entries in the calibration matrix
+    if (matrix.length() != 9) {
         return false;
     }
 
-    // Apply the new calibration as absolute min/max, if possible
-    bool anythingFailed = false;
-    struct input_absinfo absval;
+    // Reset our error status
+    xErrorOccurred = false;
 
-    // X axis calibration
-    if (ioctl(tsfd, EVIOCGABS(ABS_X), &absval) >= 0) {
-        absval.minimum = xmin;
-        absval.maximum = xmax;
-        if (ioctl(tsfd, EVIOCSABS(ABS_X), &absval) < 0) {
-            qCritical("Unable to set new X axis calibration");
-            anythingFailed = true;
+    // We are going to talk to the X server to modify the touchscreen's
+    // calibration matrix property live.
+    Display *display = XOpenDisplay(nullptr);
+    if (!display) {
+        // Couldn't open the display; something failed.
+        return false;
+    }
+
+    // Install a special error handler because of how Xlib works. This feels icky,
+    // but it's the only way that Xlib can tell us if setting the calibration
+    // was successful. Save the old handler (likely installed by Qt) so we can
+    // restore it when we're done.
+    prevErrorHandler = XSetErrorHandler(touchScreenCalibrationErrorHandler);
+
+    // We need to find the touchscreen's device in X. Get a list of all of them
+    int deviceCount;
+    XDeviceInfo *devices = XListInputDevices(display, &deviceCount);
+    if (!devices) {
+        // If we couldn't get a device list, something's wrong.
+        goto exit_close_display;
+    }
+
+    // Now loop through them and try to find one that matches
+    for (int i = 0; !found && i < deviceCount; i++) {
+        QString deviceName(devices[i].name);
+        if (deviceName == CHUMBY_TOUCHSCREEN_NAME) {
+            // We found it!
+            deviceID = devices[i].id;
+            found = true;
         }
-    } else {
-        qCritical("Unable to get existing X axis calibration");
-        anythingFailed = true;
+    }
+    XFreeDeviceList(devices);
+    if (!found) {
+        goto exit_close_display;
     }
 
-    // Y axis calibration
-    if (ioctl(tsfd, EVIOCGABS(ABS_Y), &absval) >= 0) {
-        absval.minimum = ymin;
-        absval.maximum = ymax;
-        if (ioctl(tsfd, EVIOCSABS(ABS_Y), &absval) < 0) {
-            qCritical("Unable to set new Y axis calibration");
-            anythingFailed = true;
-        }
-    } else {
-        qCritical("Unable to get existing Y axis calibration");
-        anythingFailed = true;
+    // Now, we need to open the device
+    device = XOpenDevice(display, deviceID);
+    if (!device) {
+        goto exit_close_display;
     }
 
-    // Close the file descriptor
-    ::close(tsfd);
-
-    return !anythingFailed;
-}
-
-/**
- * @brief Reads the existing calibration and applies it
- * @return true on success, false on failure
- */
-bool CalibrationUtils::applyExistingCalibration()
-{
-    if (!QFile::exists(CALIBRATION_FILE)) {
-        qCritical("No calibration file exists");
-        return false;
+    // Find the property
+    matrixAtom = XInternAtom(display, LIBINPUT_CALIBRATION_PROPERTY, true);
+    if (matrixAtom == None)
+    {
+        goto exit_close_device;
     }
 
-    // Read the contents
-    QFile calFile(CALIBRATION_FILE);
-    if (!calFile.open(QFile::ReadOnly)) {
-        qCritical("Unable to open calibration file");
-        return false;
-    }
-    QByteArray calContent = calFile.readAll();
-    calFile.close();
-
-    // Parse the contents
-    QList<QByteArray> components = calContent.split(' ');
-    if (components.count() < 4) {
-        qCritical("Not enough components in calibration file");
-        return false;
-    }
-    QList<int> calibrations;
-    for (int i = 0; i < 4; i++) {
-        bool ok = false;
-        int cal = components[i].toInt(&ok);
-        if (!ok) {
-            qCritical("Component %d in calibration file is not a number", i + 1);
-            return false;
-        }
-        calibrations << cal;
+    // We also need to be able to set "float" properties which doesn't seem
+    // to be built into X11, so grab the atom representing it
+    floatAtom = XInternAtom(display, "FLOAT", true);
+    if (floatAtom == None)
+    {
+        goto exit_close_device;
     }
 
-    // Attempt to apply them
-    return applyCalibration(calibrations[0], calibrations[1],
-                            calibrations[2], calibrations[3]);
+    // Now we can finally attempt to set the new property value of 9 floats
+    XChangeDeviceProperty(display, device, matrixAtom, floatAtom, 32, PropModeReplace,
+                          reinterpret_cast<const unsigned char *>(matrix.constData()), matrix.length());
+    // So Xlib is kind of confusing for setting properties. There is no error
+    // handling here. If setting this property fails, this function doesn't tell
+    // me. Instead, an error handler will run sometime in the future. So we had
+    // to register a custom error handler above to let us know if it failed. Crazy...
+
+    // So assume we succeeded here, and we'll check for Xlib errors when we return.
+    retval = true;
+
+exit_close_device:
+    XCloseDevice(display, device);
+
+exit_close_display:
+    // All done with the display
+    XCloseDisplay(display);
+
+    // Restore the original error handler; if an error happened, we've already been notified
+    // by the time we reach this point.
+    XSetErrorHandler(prevErrorHandler);
+
+    // As long as we think we succeeded, and no X errors occurred while we were doing
+    // our thing, we succeeded.
+    return retval && !xErrorOccurred;
 }
 
 /**
  * @brief Saves new calibration parameters to disk
- * @param xmin The minimum raw X coordinate
- * @param xmax The maximum raw X coordinate
- * @param ymin The minimum raw Y coordinate
- * @param ymax The maximum raw Y coordinate
+ * @param matrix The new 3x3 calibration matrix for libinput (top row, middle row, bottom row sequentially)
  * @return True on success, false on failure
  */
-bool CalibrationUtils::saveNewCalibration(int xmin, int xmax, int ymin, int ymax)
+bool CalibrationUtils::saveNewCalibration(QVector<float> const &matrix)
 {
+    // Ensure there are exactly 9 entries in the calibration matrix
+    if (matrix.length() != 9) {
+        return false;
+    }
+
     // The filesystem is read-only, so we will have to briefly mount it read/write.
     // This is super ugly, but figuring out how to preserve the existing mount flags
     // using the mount() system call is kind of tricky...so it's easier just to call
@@ -187,7 +220,29 @@ bool CalibrationUtils::saveNewCalibration(int xmin, int xmax, int ymin, int ymax
         return false;
     }
 
-    QByteArray outData = QString("%1 %2 %3 %4").arg(xmin).arg(xmax).arg(ymin).arg(ymax).toUtf8();
+    // To save it, we need to write a new file in xorg.conf.d for configuring the touchscreen.
+    QByteArray const calibrationFilePrefix =
+        "Section \"InputClass\"\n"
+        "\tIdentifier \"touchscreen\"\n"
+        "\tMatchIsTouchscreen \"TRUE\"\n"
+        "\tMatchDriver \"libinput\"\n"
+        "\tOption \"CalibrationMatrix\" \"";
+
+    QByteArray const calibrationFileSuffix =
+        "\"\n"
+        "EndSection\n";
+
+    // Assemble the new file contents using the provided matrix
+    QByteArray outData = calibrationFilePrefix;
+    for (int i = 0; i < matrix.length(); i++) {
+        if (i > 0) {
+            outData += " ";
+        }
+        outData += QByteArray::number(matrix[i], 'f', 6);
+    }
+    outData += calibrationFileSuffix;
+
+    // Save the new file
     QFile calFile(CALIBRATION_FILE);
     if (!calFile.open(QFile::WriteOnly | QFile::Truncate)) {
         qCritical("Unable to open calibration file for saving");

@@ -19,6 +19,8 @@
 #ifndef CALIBRATIONUTILS_H
 #define CALIBRATIONUTILS_H
 
+#include <QVector>
+
 /// The range of raw samples from the uncalibrated touchscreen
 #define RAW_TOUCHSCREEN_RANGE             4095
 
@@ -29,10 +31,8 @@ class CalibrationUtils
 {
 public:
     static int findTouchScreen();
-    static bool applyCalibration(int xmin, int xmax, int ymin, int ymax);
-    static bool applyExistingCalibration();
-    static bool applyDefaultCalibration() { return applyCalibration(0, RAW_TOUCHSCREEN_RANGE, 0, RAW_TOUCHSCREEN_RANGE); }
-    static bool saveNewCalibration(int xmin, int xmax, int ymin, int ymax);
+    static bool applyCalibration(QVector<float> const &matrix);
+    static bool saveNewCalibration(QVector<float> const &matrix);
 };
 
 #endif // CALIBRATIONUTILS_H

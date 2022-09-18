@@ -224,16 +224,10 @@ void CalibrationWindow::handleTouchUpdate(QPoint xy, bool pressed)
                 float scaleY = (botYCal - topYCal) / (botYPixels - topYPixels);
 
                 // Now use the scale to extrapolate the min and max original points.
-                float minXCalF = leftXCal - (scaleX * CROSSHAIR_OFFSET);
-                float maxXCalF = rightXCal + (scaleX * CROSSHAIR_OFFSET);
-                float minYCalF = topYCal - (scaleY * CROSSHAIR_OFFSET);
-                float maxYCalF = botYCal + (scaleY * CROSSHAIR_OFFSET);
-
-                // Round them to ints and save
-                _minXCal = qRound(minXCalF);
-                _maxXCal = qRound(maxXCalF);
-                _minYCal = qRound(minYCalF);
-                _maxYCal = qRound(maxYCalF);
+                _minXCal = leftXCal - (scaleX * CROSSHAIR_OFFSET);
+                _maxXCal = rightXCal + (scaleX * CROSSHAIR_OFFSET);
+                _minYCal = topYCal - (scaleY * CROSSHAIR_OFFSET);
+                _maxYCal = botYCal + (scaleY * CROSSHAIR_OFFSET);
 
                 // Make sure they're in range (if not, something's wrong...)
                 if (_minXCal < 0 || _maxXCal > RAW_TOUCHSCREEN_RANGE ||
@@ -243,7 +237,7 @@ void CalibrationWindow::handleTouchUpdate(QPoint xy, bool pressed)
                     _instructionsLabel.setText("Calibration error. Tap the screen to quit.");
                     _calibrationPoints.clear();
                 } else {
-                    _instructionsLabel.setText("Calibration complete. Tap the screen to save.");
+                    _instructionsLabel.setText("Calibration complete. Tap the screen to apply and save.");
                 }
 
             }
@@ -256,9 +250,29 @@ void CalibrationWindow::handleTouchUpdate(QPoint xy, bool pressed)
     {
         // Save and apply the new calibration if we just finished
         if (_calibrationPoints.length() == NUM_CAL_POINTS) {
-            if (!CalibrationUtils::saveNewCalibration(_minXCal, _maxXCal, _minYCal, _maxYCal)) {
+            // Assemble the calibration matrix. This is a 3x3 matrix that will
+            // translate a vector [x, y, 1] from normalized [0...1] raw touchscreen x/y coordinates
+            // to normalized [0...1] screen x/y coordinates. The coordinates we receive will be
+            // the raw touchscreen 0-4095 coordinates, but normalized to 0.0-1.0 instead.
+            //
+            // Note: This is currently implemented as a very simplistic calibration. It doesn't
+            // support any kind of rotation or skewing. So it assumes that all we have to do is
+            // scale and translate the X and Y coordinates in order to calibrate.. This seems to
+            // work decently enough for the Chumby 8's touchscreen. If rotation was needed, we
+            // would need to use a more complicated method for creating the calibration matrix.
+            float const rangeF = static_cast<float>(RAW_TOUCHSCREEN_RANGE);
+            float a = rangeF / (_maxXCal - _minXCal);
+            float c = _minXCal / (_minXCal - _maxXCal);
+            float e = rangeF / (_maxYCal - _minYCal);
+            float f = _minYCal / (_minYCal - _maxYCal);
+            QVector<float> calibrationMatrix = QVector<float>(
+                {a,    0.0f, c,
+                 0.0f, e,    f,
+                 0.0f, 0.0f, 1.0f});
+
+            if (!CalibrationUtils::saveNewCalibration(calibrationMatrix)) {
                 _instructionsLabel.setText("Error saving calibration. Tap the screen to quit.");
-            } else if (!CalibrationUtils::applyCalibration(_minXCal, _maxXCal, _minYCal, _maxYCal)) {
+            } else if (!CalibrationUtils::applyCalibration(calibrationMatrix)) {
                 _instructionsLabel.setText("Error applying final calibration. Tap the screen to quit.");
             } else {
                 _instructionsLabel.setText("New calibration saved and applied successfully. Tap the screen to finish.");

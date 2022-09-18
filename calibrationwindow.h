@@ -54,9 +54,9 @@ private:
     bool _touchIsPressed;
     QQueue<QPoint> _points;
 
-    int _minXCal;
-    int _maxXCal;
-    int _minYCal;
-    int _maxYCal;
+    float _minXCal;
+    float _maxXCal;
+    float _minYCal;
+    float _maxYCal;
 };
 #endif // CALIBRATIONWINDOW_H

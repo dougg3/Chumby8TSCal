@@ -20,29 +20,19 @@
 #include "calibrationutils.h"
 
 #include <QApplication>
+#include <QDesktopWidget>
 #include <cstring>
 #include <cstdlib>
 
 int main(int argc, char *argv[])
 {
-    // Check for startup args that might cause us to bail early
-    if (argc >= 2 && !std::strcmp(argv[1], "--apply")) {
-        return CalibrationUtils::applyExistingCalibration() ? EXIT_SUCCESS : EXIT_FAILURE;
-    } else if (argc >= 2 && !std::strcmp(argv[1], "--apply-or-calibrate")) {
-        if (CalibrationUtils::applyExistingCalibration()) {
-            return EXIT_SUCCESS;
-        }
-    }
-
-    // If we're not applying existing calibration, reset the stored calibration to default, just to be safe.
-    if (!CalibrationUtils::applyDefaultCalibration()) {
-        qCritical("Unable to apply default calibration to touchscreen prior to calibration.");
-        return EXIT_FAILURE;
-    }
-
     // Now load up the screen to do the calibration process
     QApplication a(argc, argv);
     CalibrationWindow w;
     w.showFullScreen();
+    // If there isn't a window manager running, showFullScreen() doesn't resize
+    // the window to full-screen properly. So make sure we're the correct size,
+    // even if there isn't a window manager running.
+    w.setGeometry(0, 0, a.desktop()->size().width(), a.desktop()->size().height());
     return a.exec();
 }
