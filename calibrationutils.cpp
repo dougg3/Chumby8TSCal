@@ -24,14 +24,13 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mount.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput.h>
 
 /// The name to look for in order to identify the touchscreen
 #define CHUMBY_TOUCHSCREEN_NAME         "Chumby 8 touchscreen"
 /// File used for storing touchscreen calibration
-#define CALIBRATION_FILE                "/etc/X11/xorg.conf.d/touchscreen.conf"
+#define CALIBRATION_FILE                "/mnt/settings/touchscreen.conf"
 /// Name of the X11 input device property containing the calibration matrix
 #define LIBINPUT_CALIBRATION_PROPERTY   "libinput Calibration Matrix"
 
@@ -211,16 +210,7 @@ bool CalibrationUtils::saveNewCalibration(QVector<float> const &matrix)
         return false;
     }
 
-    // The filesystem is read-only, so we will have to briefly mount it read/write.
-    // This is super ugly, but figuring out how to preserve the existing mount flags
-    // using the mount() system call is kind of tricky...so it's easier just to call
-    // out and let the "mount" executable handle it for us.
-    if (::system("mount -oremount,rw /") != 0) {
-        qCritical("Unable to remount rootfs read/write for calibration save");
-        return false;
-    }
-
-    // To save it, we need to write a new file in xorg.conf.d for configuring the touchscreen.
+    // To save it, we need to write a new file for configuring the touchscreen.
     QByteArray const calibrationFilePrefix =
         "Section \"InputClass\"\n"
         "\tIdentifier \"touchscreen\"\n"
@@ -254,11 +244,6 @@ bool CalibrationUtils::saveNewCalibration(QVector<float> const &matrix)
     if (written != outData.length()) {
         qCritical("Unable to write calibration file");
         return false;
-    }
-
-    // Go back to read-only. Also ugly...same reasoning as above.
-    if (::system("mount -oremount,ro /") != 0) {
-        qWarning("Unable to remount rootfs read-only after calibration save, but save succeeded");
     }
 
     return true;
